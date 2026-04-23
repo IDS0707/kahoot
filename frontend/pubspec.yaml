@@ -1,0 +1,27 @@
+name: kahoot_app
+description: "Present Perfect Quiz – Kahoot style real-time game"
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Supabase (replaces Socket.IO – handles real-time & DB)
+  supabase_flutter: ^2.3.0
+
+  # Animation helpers
+  flutter_animate: ^4.5.0
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
