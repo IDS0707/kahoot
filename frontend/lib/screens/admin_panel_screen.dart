@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
+import '../data/questions.dart';
 import '../services/socket_service.dart';
 import '../theme/app_theme.dart';
 import 'leaderboard_screen.dart';
@@ -200,6 +202,195 @@ class _AdminPanelScreenState extends State<AdminPanelScreen>
         confirmLabel: 'Reset',
         confirmColor: Colors.orange,
         onConfirm: () => SocketService.instance.resetGame(),
+      ),
+    );
+  }
+
+  void _addQuestion() {
+    _showQuestionEditor();
+  }
+
+  void _editCurrentQuestion() {
+    if (_questionIndex < 0 || _questionIndex >= kQuestions.length) return;
+    _showQuestionEditor(index: _questionIndex);
+  }
+
+  Future<void> _showQuestionEditor({int? index}) async {
+    final isEditing = index != null;
+    final existing = isEditing ? kQuestions[index] : null;
+    final questionController = TextEditingController(
+        text: existing != null ? existing['question'] as String? ?? '' : '');
+    final optionControllers = List.generate(4, (i) {
+      final options = existing != null ? existing['options'] as List? ?? const [] : const [];
+      return TextEditingController(
+          text: existing != null && i < options.length
+              ? options[i].toString()
+              : '');
+    });
+    // Faza 2: explanation / correctIndex are server-side now, so not editable
+    // here until the admin panel is rebuilt to fetch from rpc_get_question.
+    final explanationController = TextEditingController(
+        text: existing != null ? (existing['explanation'] as String?) ?? '' : '');
+    final timeLimitController = TextEditingController(
+        text: existing != null ? (existing['timeLimit'] ?? 15).toString() : '15');
+    int correctIndex =
+        existing != null ? (existing['correctIndex'] as int?) ?? 0 : 0;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setDialogState) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF1A0A3C),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(22),
+              side: const BorderSide(color: Color(0x30FFFFFF)),
+            ),
+            title: Text(isEditing ? 'Edit Question' : 'Add Question',
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 18)),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildDialogTextField(
+                      controller: questionController, label: 'Question'),
+                  const SizedBox(height: 12),
+                  for (var i = 0; i < 4; i++) ...[
+                    _buildDialogTextField(
+                      controller: optionControllers[i],
+                      label: 'Option ${i + 1}',
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  Row(
+                    children: [
+                      const Text('Correct:',
+                          style: TextStyle(color: Colors.white70)),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: DropdownButton<int>(
+                          isExpanded: true,
+                          value: correctIndex,
+                          dropdownColor: const Color(0xFF241F4A),
+                          items: List.generate(4, (i) {
+                            return DropdownMenuItem(
+                              value: i,
+                              child: Text('Option ${i + 1}',
+                                  style: const TextStyle(color: Colors.white)),
+                            );
+                          }),
+                          onChanged: (value) {
+                            if (value == null) return;
+                            setDialogState(() {
+                              correctIndex = value;
+                            });
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  _buildDialogTextField(
+                      controller: explanationController,
+                      label: 'Explanation',
+                      maxLines: 3),
+                  const SizedBox(height: 12),
+                  _buildDialogTextField(
+                      controller: timeLimitController,
+                      label: 'Time Limit (seconds)',
+                      keyboardType: TextInputType.number),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel',
+                    style: TextStyle(color: Colors.white54)),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  final questionText = questionController.text.trim();
+                  final options = optionControllers
+                      .map((ctrl) => ctrl.text.trim())
+                      .where((text) => text.isNotEmpty)
+                      .toList();
+                  final explanationText = explanationController.text.trim();
+                  final timeLimit =
+                      int.tryParse(timeLimitController.text) ?? 15;
+
+                  if (questionText.isEmpty || options.length < 2) {
+                    return;
+                  }
+                  final newQuestion = {
+                    'question': questionText,
+                    'options': options,
+                    'correctIndex': correctIndex.clamp(0, options.length - 1),
+                    'timeLimit': max(5, timeLimit),
+                    'explanation': explanationText,
+                  };
+
+                  setState(() {
+                    if (isEditing) {
+                      kQuestions[index] = newQuestion;
+                      if (_questionIndex == index) {
+                        _currentQuestion = questionText;
+                        _options = List<String>.from(options);
+                        _correctIndex = newQuestion['correctIndex'] as int;
+                        _timeLimit = newQuestion['timeLimit'] as int;
+                        _explanation = explanationText;
+                      }
+                    } else {
+                      kQuestions.add(newQuestion);
+                    }
+                    _totalQuestions = kQuestions.length;
+                  });
+
+                  Navigator.pop(ctx);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.accentNeon,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                ),
+                child: Text(isEditing ? 'Save' : 'Add',
+                    style: const TextStyle(fontWeight: FontWeight.w700)),
+              ),
+            ],
+          );
+        });
+      },
+    );
+  }
+
+  Widget _buildDialogTextField({
+    required TextEditingController controller,
+    required String label,
+    int maxLines = 1,
+    TextInputType keyboardType = TextInputType.text,
+  }) {
+    return TextField(
+      controller: controller,
+      maxLines: maxLines,
+      keyboardType: keyboardType,
+      style: const TextStyle(color: Colors.white),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: const TextStyle(color: Colors.white54),
+        filled: true,
+        fillColor: const Color(0xFF1B0F45),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: Colors.white12),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: Colors.white10),
+        ),
       ),
     );
   }
@@ -538,6 +729,24 @@ class _AdminPanelScreenState extends State<AdminPanelScreen>
             subtitle: 'Clear all scores, back to waiting room',
             color: Colors.orange,
             onTap: _resetGame,
+          ),
+          const SizedBox(height: 12),
+          _AdminActionCard(
+            icon: Icons.add_rounded,
+            title: 'Add Question',
+            subtitle: 'Create a new quiz question',
+            color: AppTheme.accent,
+            onTap: _addQuestion,
+          ),
+          const SizedBox(height: 12),
+          _AdminActionCard(
+            icon: Icons.edit_rounded,
+            title: 'Edit Current Question',
+            subtitle: _currentQuestion.isNotEmpty
+                ? 'Modify the question in play'
+                : 'No question currently active',
+            color: Colors.lightBlueAccent,
+            onTap: _currentQuestion.isNotEmpty ? _editCurrentQuestion : null,
           ),
 
           const SizedBox(height: 24),

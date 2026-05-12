@@ -17,6 +17,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _nameController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
   bool _isLoading = false;
+  bool _joinAsHost = false;
   String? _errorMessage;
 
   @override
@@ -63,7 +64,70 @@ class _LoginScreenState extends State<LoginScreen> {
       );
     };
 
-    socket.join(_nameController.text.trim());
+    socket.join(_nameController.text.trim(), asHost: _joinAsHost);
+  }
+
+  void _instagramLogin() async {
+    final instagramController = TextEditingController();
+
+    final handle = await showDialog<String?>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1A0A3C),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(22),
+            side: const BorderSide(color: Color(0x30FFFFFF)),
+          ),
+          title: const Text('Instagram Login',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 18)),
+          content: TextField(
+            controller: instagramController,
+            decoration: const InputDecoration(
+              labelText: 'Instagram handle',
+              hintText: 'e.g. your_username',
+              labelStyle: TextStyle(color: Colors.white54),
+              enabledBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: Colors.white30),
+              ),
+            ),
+            style: const TextStyle(color: Colors.white),
+            autofocus: true,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child:
+                  const Text('Cancel', style: TextStyle(color: Colors.white54)),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final value = instagramController.text.trim();
+                Navigator.pop(ctx, value.isEmpty ? null : value);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF405DE6),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+              child: const Text('Continue'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (handle != null && handle.isNotEmpty) {
+      setState(() {
+        _nameController.text = handle;
+        _joinAsHost = false;
+      });
+      _joinGame();
+    }
   }
 
   @override
@@ -239,6 +303,28 @@ class _LoginScreenState extends State<LoginScreen> {
             },
             onFieldSubmitted: (_) => _joinGame(),
           ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Checkbox(
+                value: _joinAsHost,
+                onChanged: (value) {
+                  setState(() {
+                    _joinAsHost = value ?? false;
+                  });
+                },
+                fillColor: MaterialStateProperty.all(
+                  const Color(0xFF7C3AED),
+                ),
+              ),
+              const Expanded(
+                child: Text(
+                  'Join as host',
+                  style: TextStyle(color: Colors.white70, fontSize: 14),
+                ),
+              ),
+            ],
+          ),
 
           // Error
           if (_errorMessage != null) ...[
@@ -274,6 +360,8 @@ class _LoginScreenState extends State<LoginScreen> {
             isLoading: _isLoading,
             onPressed: _joinGame,
           ),
+          const SizedBox(height: 16),
+          _InstagramLoginButton(onPressed: _instagramLogin),
         ],
       ),
     ).animate().fadeIn(delay: 500.ms, duration: 600.ms).slideY(
@@ -341,6 +429,54 @@ class _JoinButton extends StatelessWidget {
                     ),
                   ],
                 ),
+        ),
+      ),
+    );
+  }
+}
+
+class _InstagramLoginButton extends StatelessWidget {
+  final VoidCallback onPressed;
+
+  const _InstagramLoginButton({required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onPressed,
+      child: Container(
+        height: 58,
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFFF58529), Color(0xFFDD2A7B)],
+          ),
+          borderRadius: BorderRadius.circular(18),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.18),
+              blurRadius: 18,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: const Center(
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.camera_alt_rounded, color: Colors.white, size: 22),
+              SizedBox(width: 10),
+              Text(
+                'Login with Instagram',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

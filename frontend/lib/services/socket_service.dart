@@ -27,10 +27,8 @@ class SocketService {
 
   String? _roomId;
   String? _playerId;
-  String? _playerName;
   bool _isHost = false;
   int _currentQuestionIndex = 0;
-  int _questionStartMs = 0;
   int _localScore = 0;
   int _activeNonHostCount = 0;
   bool _roomUpdateInFlight = false;
@@ -67,21 +65,21 @@ class SocketService {
 
   // ── Join ─────────────────────────────────────────────────────────────────────
 
-  void join(String name) {
+  void join(String name, {bool asHost = false}) {
     if (!_initialized) {
       onError?.call('Not connected');
       return;
     }
-    _doJoin(name).catchError((e) {
+    _doJoin(name, asHost: asHost).catchError((e) {
       debugPrint('[GameService] join error: $e');
       onError?.call('Failed to join: $e');
     });
   }
 
-  Future<void> _doJoin(String rawName) async {
+  Future<void> _doJoin(String rawName, {bool asHost = false}) async {
     final safeName =
         rawName.trim().substring(0, min(20, rawName.trim().length));
-    final isAdmin = safeName.toLowerCase() == 'admin771';
+    final isAdmin = asHost || safeName.toLowerCase() == 'admin771';
 
     // ── Find or create room ──────────────────────────────────────────────────
     final roomId = await _findOrCreateRoom(isAdmin);
@@ -91,14 +89,18 @@ class SocketService {
     }
     _roomId = roomId;
 
-    // ── Check room status ────────────────────────────────────────────────────
-    final roomRows =
-        await _db.from('game_rooms').select('status').eq('id', roomId).limit(1);
+    // ── Check room status + grab the human-readable code ─────────────────────
+    final roomRows = await _db
+        .from('game_rooms')
+        .select('status, code')
+        .eq('id', roomId)
+        .limit(1);
     if (roomRows.isEmpty) {
       onError?.call('Room not found.');
       return;
     }
     final status = roomRows[0]['status'] as String;
+    final roomCode = roomRows[0]['code'] as String?;
     if (status == 'playing' && !isAdmin) {
       onError?.call('Game already in progress');
       return;
@@ -126,7 +128,6 @@ class SocketService {
         .single();
 
     _playerId = player['id'] as String;
-    _playerName = safeName;
     _isHost = isAdmin;
     _localScore = 0;
 
@@ -141,6 +142,8 @@ class SocketService {
       'name': safeName,
       'isHost': isAdmin,
       'players': players,
+      'roomCode': roomCode,
+      'roomId': roomId,
     });
     onRoomUpdate?.call({'players': players, 'count': players.length});
   }
@@ -278,7 +281,6 @@ class SocketService {
 
       case 'new_question':
         _currentQuestionIndex = payload['index'] as int;
-        _questionStartMs = DateTime.now().millisecondsSinceEpoch;
         if (_isHost) _startQuestionTimer(payload['timeLimit'] as int);
         onNewQuestion?.call(payload);
 
@@ -327,31 +329,73 @@ class SocketService {
     _questionTimer = Timer(Duration(seconds: seconds), _processQuestionEnd);
   }
 
+  int _serverTotalQuestions = 0;
+
   void _sendNextQuestion() {
     if (!_isHost || _roomId == null) return;
-    if (_currentQuestionIndex >= kQuestions.length) {
-      _doEndGame().catchError((e) => debugPrint('[GameService] endGame: $e'));
-      return;
-    }
     _doSendQuestion(_currentQuestionIndex)
         .catchError((e) => debugPrint('[GameService] sendQuestion: $e'));
   }
 
   Future<void> _doSendQuestion(int index) async {
-    final q = kQuestions[index];
+    // Server is authoritative for the question vault. If we've fallen off
+    // the end, end the game.
+    if (_serverTotalQuestions == 0) {
+      try {
+        final cnt =
+            await _db.rpc('rpc_question_count') as int? ?? kQuestions.length;
+        _serverTotalQuestions = cnt;
+      } catch (_) {
+        _serverTotalQuestions = kQuestions.length;
+      }
+    }
+    if (index >= _serverTotalQuestions) {
+      await _doEndGame();
+      return;
+    }
+
+    Map<String, dynamic> payload;
+    try {
+      final raw = await _db.rpc(
+        'rpc_get_question',
+        params: {'p_position': index},
+      );
+      payload = Map<String, dynamic>.from(raw as Map);
+    } catch (e) {
+      // Fallback to local cache if RPC unavailable (older DBs).
+      debugPrint('[GameService] rpc_get_question failed, falling back: $e');
+      final q = kQuestions[index];
+      payload = {
+        'index': index,
+        'total': kQuestions.length,
+        'question': q['question'],
+        'options': q['options'],
+        'timeLimit': q['timeLimit'],
+        'difficulty': q['difficulty'] ?? 'medium',
+        'category': q['category'] ?? 'present_perfect',
+      };
+    }
+
     _answeredPlayerIds.clear();
     _endingQuestion = false;
-    await _insertEvent('new_question', {
-      'index': index,
-      'total': kQuestions.length,
-      'question': q['question'],
-      'options': q['options'],
-      'timeLimit': q['timeLimit'],
-      // correctIndex intentionally omitted from network payload
-    });
-    await _db
-        .from('game_rooms')
-        .update({'current_question_index': index}).eq('id', _roomId!);
+
+    // Tell the server "this question started NOW" — this is the server
+    // timestamp rpc_submit_answer will use to compute elapsed time.
+    try {
+      await _db.rpc('rpc_start_question', params: {
+        'p_room_id': _roomId,
+        'p_player_id': _playerId,
+        'p_question_index': index,
+      });
+    } catch (e) {
+      // Older DBs: at least flip the index ourselves.
+      debugPrint('[GameService] rpc_start_question fallback: $e');
+      await _db
+          .from('game_rooms')
+          .update({'current_question_index': index}).eq('id', _roomId!);
+    }
+
+    await _insertEvent('new_question', payload);
   }
 
   void _processQuestionEnd() {
@@ -364,13 +408,30 @@ class SocketService {
     if (_endingQuestion) return;
     _endingQuestion = true;
     _questionTimer?.cancel();
-    final q = kQuestions[_currentQuestionIndex];
+
+    Map<String, dynamic> reveal;
+    try {
+      final raw = await _db.rpc('rpc_reveal_answer', params: {
+        'p_room_id': _roomId,
+        'p_player_id': _playerId,
+        'p_question_index': _currentQuestionIndex,
+      });
+      reveal = Map<String, dynamic>.from(raw as Map);
+    } catch (e) {
+      // Fallback: legacy local source (only used if SQL migration not run).
+      debugPrint('[GameService] rpc_reveal_answer fallback: $e');
+      final q = kQuestions[_currentQuestionIndex];
+      reveal = {
+        'questionIndex': _currentQuestionIndex,
+        'correctIndex': q['correctIndex'],
+        'correctAnswer': (q['options'] as List)[(q['correctIndex'] as int)],
+        'explanation': q['explanation'],
+      };
+    }
+
     final leaderboard = await _buildLeaderboard();
     await _insertEvent('question_result', {
-      'questionIndex': _currentQuestionIndex,
-      'correctIndex': q['correctIndex'],
-      'correctAnswer': (q['options'] as List)[(q['correctIndex'] as int)],
-      'explanation': q['explanation'],
+      ...reveal,
       'leaderboard': leaderboard,
     });
     _currentQuestionIndex++;
@@ -410,50 +471,50 @@ class SocketService {
   }
 
   // ── Player: send answer ──────────────────────────────────────────────────────
+  // Server-side validation: client never knows correctIndex before reveal.
 
   void sendAnswer(int questionIndex, int answerIndex) {
     if (_roomId == null || _playerId == null) return;
-
-    final q = kQuestions[questionIndex];
-    final isCorrect = answerIndex == (q['correctIndex'] as int);
-    final elapsed =
-        (DateTime.now().millisecondsSinceEpoch - _questionStartMs) / 1000.0;
-    final timeLimit = (q['timeLimit'] as int).toDouble();
-    final points =
-        isCorrect ? max(100, (1000 * (1 - elapsed / timeLimit)).round()) : 0;
-
-    _localScore += points;
-
-    // Immediate UI feedback (no network round-trip needed)
-    onAnswerResult?.call({
-      'isCorrect': isCorrect,
-      'points': points,
-      'correctIndex': q['correctIndex'],
-      'totalScore': _localScore,
-    });
-
-    // Persist to DB asynchronously
-    _saveAnswer(questionIndex, answerIndex, isCorrect, points)
-        .catchError((e) => debugPrint('[GameService] saveAnswer: $e'));
+    _submitAnswerRpc(questionIndex, answerIndex)
+        .catchError((e) => debugPrint('[GameService] submitAnswer: $e'));
   }
 
-  Future<void> _saveAnswer(
-      int questionIndex, int answerIndex, bool isCorrect, int points) async {
-    await _db.from('game_answers').upsert(
-      {
-        'room_id': _roomId,
-        'player_id': _playerId,
-        'player_name': _playerName ?? '',
-        'question_index': questionIndex,
-        'answer_index': answerIndex,
-        'is_correct': isCorrect,
-        'points_earned': points,
-      },
-      onConflict: 'player_id,question_index',
-    );
-    await _db
-        .from('game_players')
-        .update({'score': _localScore}).eq('id', _playerId!);
+  Future<void> _submitAnswerRpc(int questionIndex, int answerIndex) async {
+    try {
+      final raw = await _db.rpc('rpc_submit_answer', params: {
+        'p_room_id': _roomId,
+        'p_player_id': _playerId,
+        'p_question_index': questionIndex,
+        'p_choice': answerIndex,
+      });
+      final result = Map<String, dynamic>.from(raw as Map);
+      _localScore = (result['totalScore'] as num?)?.toInt() ?? _localScore;
+      // No correctIndex in payload — UI just shows "answer locked" until reveal.
+      onAnswerResult?.call({
+        'isCorrect': result['isCorrect'] ?? false,
+        'points': result['points'] ?? 0,
+        'basePoints': result['basePoints'] ?? 0,
+        'streakBonus': result['streakBonus'] ?? 0,
+        'comboMultiplier': result['comboMultiplier'] ?? 1.0,
+        'streak': result['streak'] ?? 0,
+        'totalScore': _localScore,
+        'serverValidated': true,
+      });
+    } catch (e) {
+      debugPrint('[GameService] rpc_submit_answer error: $e');
+      // Surface a non-scoring lock-in so the UI can stop accepting taps.
+      onAnswerResult?.call({
+        'isCorrect': false,
+        'points': 0,
+        'basePoints': 0,
+        'streakBonus': 0,
+        'comboMultiplier': 1.0,
+        'streak': 0,
+        'totalScore': _localScore,
+        'serverValidated': false,
+        'error': e.toString(),
+      });
+    }
   }
 
   // ── Admin controls ───────────────────────────────────────────────────────────
@@ -508,7 +569,6 @@ class SocketService {
     }
     _roomId = null;
     _playerId = null;
-    _playerName = null;
     _isHost = false;
     _initialized = false;
   }
